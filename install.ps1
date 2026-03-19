@@ -50,8 +50,11 @@ if (-not (Test-Path "$VenvDir\Scripts\python.exe")) {
 }
 
 # ── Install deps if needed ───────────────────────────────
-$TestImport = & "$VenvDir\Scripts\python.exe" -c "import toolkit" 2>&1
-if ($LASTEXITCODE -ne 0) {
+$ErrorActionPreference = "Continue"
+& "$VenvDir\Scripts\python.exe" -c "import toolkit" 2>$null
+$NeedInstall = $LASTEXITCODE -ne 0
+$ErrorActionPreference = "Stop"
+if ($NeedInstall) {
     Write-Host "Installing dependencies…"
     & "$VenvDir\Scripts\pip.exe" install --upgrade pip -q
     & "$VenvDir\Scripts\pip.exe" install -e $InstallDir -q
