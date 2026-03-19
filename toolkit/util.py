@@ -30,6 +30,18 @@ class CommandError(RuntimeError):
 IS_LINUX = platform.system() == "Linux"
 IS_WINDOWS = platform.system() == "Windows"
 
+
+def is_root() -> bool:
+    """Return True if running as root/administrator."""
+    if IS_WINDOWS:
+        try:
+            import ctypes
+            return ctypes.windll.shell32.IsUserAnAdmin() != 0
+        except Exception:
+            return False
+    return hasattr(os, "geteuid") and os.geteuid() == 0
+
+
 # ── Subprocess wrapper ───────────────────────────────────────────────────
 
 def run_cmd(
@@ -71,8 +83,11 @@ def run_cmd(
         )
     except FileNotFoundError:
         raise CommandError(cmd, 127, f"Command not found: {cmd[0]}")
-    except subprocess.TimeoutExpired:
-        raise CommandError(cmd, -1, f"Command timed out after {timeout}s")
+    except subprocess.TimeoutExpired as exc:
+        stderr_text = ""
+        if hasattr(exc, "stderr") and exc.stderr:
+            stderr_text = exc.stderr if isinstance(exc.stderr, str) else exc.stderr.decode(errors="replace")
+        raise CommandError(cmd, -1, f"Command timed out after {timeout}s. {stderr_text}")
 
     # Append output to the log file
     if capture:
@@ -105,7 +120,7 @@ def require_sudo() -> None:
 
 def check_not_root() -> bool:
     """Warn if running as root.  Returns True if the user wants to continue."""
-    if IS_WINDOWS or os.geteuid() != 0:  # type: ignore[attr-defined]
+    if not is_root():
         return True
     log_warn("This script should NOT be run as root.")
     log_warn("AUR helpers (yay/paru) refuse to run as root.")

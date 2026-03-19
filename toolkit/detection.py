@@ -201,11 +201,12 @@ class SystemDetect:
         elif IS_WINDOWS:
             rows.append(("Package manager", self.pkg_manager or "(none)"))
 
-        try:
-            import subprocess as _sp
-            kernel = _sp.check_output(["uname", "-r"], text=True, timeout=5).strip()
-            rows.append(("Kernel", kernel))
-        except Exception:
-            pass
+        if IS_LINUX:
+            try:
+                import subprocess as _sp
+                kernel = _sp.check_output(["uname", "-r"], text=True, timeout=5).strip()
+                rows.append(("Kernel", kernel))
+            except Exception:
+                pass
 
         info_table("System Detection Results", rows)

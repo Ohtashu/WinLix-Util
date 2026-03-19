@@ -10,7 +10,6 @@ Ports the full KDE theming engine from the Bash script, including:
 
 from __future__ import annotations
 
-import os
 import re
 import shutil
 import subprocess
@@ -32,7 +31,7 @@ from toolkit.ui import (
     section,
     banner,
 )
-from toolkit.util import CommandError, gh_clone, require_sudo, run_cmd
+from toolkit.util import CommandError, gh_clone, is_root, require_sudo, run_cmd
 
 # ── Theme / icon / font registries ───────────────────────────────────────
 
@@ -280,7 +279,7 @@ class KDEThemer:
         log(f"Selected theme: {theme['name']}")
 
         # Arch: try AUR first
-        if self.system.distro_family == "arch" and self.system.aur_helper and os.geteuid() != 0:
+        if self.system.distro_family == "arch" and self.system.aur_helper and not is_root():
             log_info(f"Trying AUR package: {theme['aur']}")
             if self.pkg.install(theme["aur"]):
                 log_ok(f"{theme['name']} installed from AUR.")
@@ -424,7 +423,7 @@ class KDEThemer:
                 return
 
         # Arch AUR
-        if self.system.distro_family == "arch" and self.system.aur_helper and os.geteuid() != 0:
+        if self.system.distro_family == "arch" and self.system.aur_helper and not is_root():
             if self.pkg.install(pack["aur"]):
                 log_ok(f"{pack['name']} installed from AUR.")
                 self._set_icon_theme(pack["folder"])
@@ -742,10 +741,29 @@ class KDEThemer:
         except Exception:
             return
 
-        # Step 1: WhiteSur KDE Theme
+        self._macos_step_kde_theme()
+        self._macos_step_icon_theme()
+        self._macos_step_cursor_theme()
+        self._macos_step_fonts()
+        self._macos_step_layout()
+        self._macos_step_firefox()
+
+        console.print()
+        console.print("  [bold green]macOS-style setup complete![/bold green]")
+        console.print()
+        console.print("  Applied:")
+        console.print("    ✔ WhiteSur KDE Global Theme")
+        console.print("    ✔ WhiteSur Icon Theme")
+        console.print("    ✔ WhiteSur Cursor Theme")
+        console.print("    ✔ Fonts: Inter (UI) + JetBrains Mono NF (terminal)")
+        console.print("    ✔ Layout: left window buttons, blur, translucency")
+        console.print("    ✔ Firefox: WhiteSur macOS theme")
+        log_info("Restart Plasma or reboot for all changes to take full effect.")
+
+    def _macos_step_kde_theme(self) -> None:
         section("Step 1/6 — WhiteSur KDE Global Theme")
         kde_installed = False
-        if self.system.distro_family == "arch" and self.system.aur_helper and os.geteuid() != 0:
+        if self.system.distro_family == "arch" and self.system.aur_helper and not is_root():
             if self.pkg.install("whitesur-kde-theme-git"):
                 kde_installed = True
                 log_ok("WhiteSur KDE theme installed from AUR.")
@@ -772,10 +790,10 @@ class KDEThemer:
             except CommandError:
                 log_warn("Could not apply look-and-feel.")
 
-        # Step 2: WhiteSur Icon Theme
+    def _macos_step_icon_theme(self) -> None:
         section("Step 2/6 — WhiteSur Icon Theme")
         icons_installed = False
-        if self.system.distro_family == "arch" and self.system.aur_helper and os.geteuid() != 0:
+        if self.system.distro_family == "arch" and self.system.aur_helper and not is_root():
             if self.pkg.install("whitesur-icon-theme-git"):
                 icons_installed = True
         if not icons_installed:
@@ -790,10 +808,10 @@ class KDEThemer:
         if icons_installed:
             self._set_icon_theme("WhiteSur")
 
-        # Step 3: macOS Cursor Theme
+    def _macos_step_cursor_theme(self) -> None:
         section("Step 3/6 — macOS Cursor Theme")
         cursor_installed = False
-        if self.system.distro_family == "arch" and self.system.aur_helper and os.geteuid() != 0:
+        if self.system.distro_family == "arch" and self.system.aur_helper and not is_root():
             if self.pkg.install("whitesur-cursor-theme-git"):
                 cursor_installed = True
         if not cursor_installed:
@@ -822,15 +840,13 @@ class KDEThemer:
                 except CommandError:
                     continue
 
-        # Step 4: macOS-style Fonts
+    def _macos_step_fonts(self) -> None:
         section("Step 4/6 — macOS-style Fonts")
-        # Install Inter
         match self.system.distro_family:
             case "debian": self.pkg.install("fonts-inter")
             case "fedora": self.pkg.install("inter-fonts")
             case "arch": self.pkg.install("inter-font")
 
-        # Install JetBrains Mono NF
         mono_family = "JetBrainsMono Nerd Font"
         match self.system.distro_family:
             case "arch":
@@ -857,8 +873,9 @@ class KDEThemer:
                 self._set_gtk_key(ini, "gtk-font-name", "Inter 10")
             log_ok("GTK fonts set to: Inter 10")
 
-        # Step 5: KDE Layout
+    def _macos_step_layout(self) -> None:
         section("Step 5/6 — macOS-style Panel Layout")
+        kwc = self._kwc()
         if kwc:
             run_cmd([kwc, "--file", "kwinrc", "--group", "org.kde.kdecoration2", "--key", "ButtonsOnLeft", "XIA"], check=False)
             run_cmd([kwc, "--file", "kwinrc", "--group", "org.kde.kdecoration2", "--key", "ButtonsOnRight", ""], check=False)
@@ -869,7 +886,6 @@ class KDEThemer:
             run_cmd([kwc, "--file", "kwinrc", "--group", "Effect-overview", "--key", "BorderActivate", "1"], check=False)
             log_ok("KWin settings configured (left buttons, blur, translucency).")
 
-            # Reconfigure KWin live
             if shutil.which("dbus-send"):
                 run_cmd([
                     "dbus-send", "--session", "--dest=org.kde.KWin", "/KWin",
@@ -879,22 +895,10 @@ class KDEThemer:
         log_ok("macOS-style panel layout configured.")
         log_info("For best results, log out and back in, or reboot.")
 
-        # Step 6: Firefox macOS Theme
+    def _macos_step_firefox(self) -> None:
         section("Step 6/6 — WhiteSur Firefox Theme")
         from toolkit.theming.firefox import FirefoxThemer
         FirefoxThemer(self.system, self.pkg).run(show_banner=False)
-
-        console.print()
-        console.print("  [bold green]macOS-style setup complete![/bold green]")
-        console.print()
-        console.print("  Applied:")
-        console.print("    ✔ WhiteSur KDE Global Theme")
-        console.print("    ✔ WhiteSur Icon Theme")
-        console.print("    ✔ WhiteSur Cursor Theme")
-        console.print("    ✔ Fonts: Inter (UI) + JetBrains Mono NF (terminal)")
-        console.print("    ✔ Layout: left window buttons, blur, translucency")
-        console.print("    ✔ Firefox: WhiteSur macOS theme")
-        log_info("Restart Plasma or reboot for all changes to take full effect.")
 
     # ── Restore default layout ────────────────────────────────────────
 

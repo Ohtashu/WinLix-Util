@@ -6,11 +6,9 @@ system package manager (apt, dnf, pacman+AUR, winget, choco).
 
 from __future__ import annotations
 
-import os
-
 from toolkit.detection import SystemDetect
 from toolkit.ui import log, log_err, log_ok
-from toolkit.util import IS_LINUX, IS_WINDOWS, CommandError, run_cmd
+from toolkit.util import IS_LINUX, IS_WINDOWS, CommandError, is_root, run_cmd
 
 
 class PackageManager:
@@ -102,9 +100,12 @@ class PackageManager:
     # ── Private helpers ───────────────────────────────────────────────
 
     def _arch_install(self, pkgs: list[str]) -> None:
-        """Install via AUR helper (preferred) or pacman."""
-        is_root = hasattr(os, "geteuid") and os.geteuid() == 0
-        if self.system.aur_helper and not is_root:
+        """Install via AUR helper (preferred) or pacman.
+
+        AUR helpers (yay/paru) MUST run as a normal user, never as root.
+        Core pacman operations elevate via sudo.
+        """
+        if self.system.aur_helper and not is_root():
             run_cmd([self.system.aur_helper, "-S", "--needed", "--noconfirm", *pkgs])
         else:
             run_cmd(["pacman", "-S", "--needed", "--noconfirm", *pkgs], sudo=True)
