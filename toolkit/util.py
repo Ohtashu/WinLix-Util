@@ -122,6 +122,9 @@ def check_not_root() -> bool:
     """Warn if running as root.  Returns True if the user wants to continue."""
     if not is_root():
         return True
+    if IS_WINDOWS:
+        # On Windows, running as admin is fine — no AUR concerns
+        return True
     log_warn("This script should NOT be run as root.")
     log_warn("AUR helpers (yay/paru) refuse to run as root.")
     log_warn("Only individual commands will be elevated with sudo.")

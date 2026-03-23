@@ -63,6 +63,14 @@ _DB_MAP: dict[str, dict[str, dict[str, str]]] = {
     },
 }
 
+# Binaries to check whether a DB engine is already installed
+_DB_BINARIES: dict[str, list[str]] = {
+    "mariadb":    ["mariadb", "mysql", "mariadbd", "mysqld"],
+    "mysql":      ["mysql", "mysqld"],
+    "postgresql": ["psql", "pg_isready"],
+    "mongodb":    ["mongod", "mongosh", "mongo"],
+}
+
 
 class DatabaseSetup:
     """Interactive database server setup wizard."""
@@ -103,14 +111,28 @@ class DatabaseSetup:
             log_err(f"No package mapping for {engine} on {family or 'this platform'}.")
             return
 
-        # Install
         pkgs = info["pkg"]
         svc = info["svc"]
-        log(f"Installing: {pkgs}")
-        if not self.pkg.install(*pkgs.split()):
-            log_err("Package installation failed.")
-            return
-        log_ok(f"{engine.title()} packages installed.")
+
+        # Check if already installed
+        already_installed = any(
+            shutil.which(b) for b in _DB_BINARIES.get(engine, [])
+        )
+
+        if already_installed:
+            log_ok(f"{engine.title()} is already installed.")
+        else:
+            # Install
+            if IS_WINDOWS:
+                log_info(f"Installing {engine.title()} via winget (may require Administrator)...")
+            log(f"Installing: {pkgs}")
+            if not self.pkg.install(*pkgs.split()):
+                log_err("Package installation failed.")
+                if IS_WINDOWS:
+                    log_info("Try running this script as Administrator, or install manually:")
+                    console.print(f"    winget install -e --id {pkgs}")
+                return
+            log_ok(f"{engine.title()} packages installed.")
 
         # PostgreSQL init on Arch/Fedora
         if engine == "postgresql" and not IS_WINDOWS:
@@ -142,17 +164,68 @@ class DatabaseSetup:
         log_ok(f"{engine.title()} setup complete.")
 
     def _start_windows_service(self, svc: str, engine: str) -> None:
-        """Attempt to start a Windows service."""
+        """Find, auto-start, and start a Windows service."""
+        # Try to find the service (it might have a slightly different name)
+        svc_name = self._find_windows_service(svc, engine)
+        if not svc_name:
+            log_warn(
+                f"Could not find the {engine} Windows service.\n"
+                f"    You may need to start it manually from Services (services.msc)."
+            )
+            return
+
+        # Set service to auto-start
         try:
-            run_cmd(["sc", "query", svc], check=False)
-            run_cmd(["net", "start", svc], check=False)
-            log_ok(f"Service '{svc}' started.")
+            run_cmd(["sc", "config", svc_name, "start=", "auto"], check=False)
+            log_ok(f"Service '{svc_name}' set to start automatically.")
+        except CommandError:
+            log_warn(f"Could not set '{svc_name}' to auto-start.")
+
+        # Check if already running
+        try:
+            r = run_cmd(["sc", "query", svc_name], check=False)
+            if r.stdout and "RUNNING" in r.stdout:
+                log_ok(f"Service '{svc_name}' is already running.")
+                return
+        except CommandError:
+            pass
+
+        # Start the service
+        try:
+            run_cmd(["net", "start", svc_name], check=False)
+            log_ok(f"Service '{svc_name}' started.")
         except CommandError:
             log_info(
                 f"Could not auto-start the {engine} service.\n"
-                f"    You may need to start it manually from Services (services.msc)\n"
-                f"    or run: net start {svc}"
+                f"    Try running as Administrator, or start manually:\n"
+                f"    net start {svc_name}"
             )
+
+    def _find_windows_service(self, svc: str, engine: str) -> str | None:
+        """Find the actual Windows service name (services may vary by version)."""
+        # Try exact name first
+        try:
+            r = run_cmd(["sc", "query", svc], check=False)
+            if r.stdout and "SERVICE_NAME" in r.stdout:
+                return svc
+        except CommandError:
+            pass
+
+        # Try common alternative names
+        alternatives: dict[str, list[str]] = {
+            "mariadb":    ["MariaDB", "mariadb", "MySQL"],
+            "mysql":      ["MySQL", "MySQL80", "MySQL57", "mysql"],
+            "postgresql": ["postgresql-x64-17", "postgresql-x64-16", "postgresql-x64-15", "postgresql"],
+            "mongodb":    ["MongoDB", "mongod"],
+        }
+        for alt in alternatives.get(engine, []):
+            try:
+                r = run_cmd(["sc", "query", alt], check=False)
+                if r.stdout and "SERVICE_NAME" in r.stdout:
+                    return alt
+            except CommandError:
+                continue
+        return None
 
     # ── MySQL / MariaDB wizard ────────────────────────────────────────
 
