@@ -32,30 +32,34 @@ from toolkit.ui import (
     menu_table,
     press_enter,
 )
-from toolkit.util import CommandError, IS_LINUX, run_cmd, require_sudo
+from toolkit.util import CommandError, IS_LINUX, IS_WINDOWS, run_cmd, require_sudo
 
 # ── Package mappings ──────────────────────────────────────────────────
 
 _DB_MAP: dict[str, dict[str, dict[str, str]]] = {
     "mariadb": {
-        "debian": {"pkg": "mariadb-server mariadb-client", "svc": "mariadb"},
-        "fedora": {"pkg": "mariadb-server", "svc": "mariadb"},
-        "arch":   {"pkg": "mariadb", "svc": "mariadb"},
+        "debian":  {"pkg": "mariadb-server mariadb-client", "svc": "mariadb"},
+        "fedora":  {"pkg": "mariadb-server", "svc": "mariadb"},
+        "arch":    {"pkg": "mariadb", "svc": "mariadb"},
+        "windows": {"pkg": "MariaDB.Server", "svc": "MariaDB"},
     },
     "mysql": {
-        "debian": {"pkg": "mysql-server mysql-client", "svc": "mysql"},
-        "fedora": {"pkg": "mysql-server", "svc": "mysqld"},
-        "arch":   {"pkg": "mysql", "svc": "mysqld"},
+        "debian":  {"pkg": "mysql-server mysql-client", "svc": "mysql"},
+        "fedora":  {"pkg": "mysql-server", "svc": "mysqld"},
+        "arch":    {"pkg": "mysql", "svc": "mysqld"},
+        "windows": {"pkg": "Oracle.MySQL", "svc": "MySQL"},
     },
     "postgresql": {
-        "debian": {"pkg": "postgresql postgresql-client", "svc": "postgresql"},
-        "fedora": {"pkg": "postgresql-server postgresql", "svc": "postgresql"},
-        "arch":   {"pkg": "postgresql", "svc": "postgresql"},
+        "debian":  {"pkg": "postgresql postgresql-client", "svc": "postgresql"},
+        "fedora":  {"pkg": "postgresql-server postgresql", "svc": "postgresql"},
+        "arch":    {"pkg": "postgresql", "svc": "postgresql"},
+        "windows": {"pkg": "PostgreSQL.PostgreSQL", "svc": "postgresql-x64-17"},
     },
     "mongodb": {
-        "debian": {"pkg": "mongodb-org", "svc": "mongod"},
-        "fedora": {"pkg": "mongodb-org", "svc": "mongod"},
-        "arch":   {"pkg": "mongodb-bin", "svc": "mongodb"},
+        "debian":  {"pkg": "mongodb-org", "svc": "mongod"},
+        "fedora":  {"pkg": "mongodb-org", "svc": "mongod"},
+        "arch":    {"pkg": "mongodb-bin", "svc": "mongodb"},
+        "windows": {"pkg": "MongoDB.Server", "svc": "MongoDB"},
     },
 }
 
@@ -93,10 +97,10 @@ class DatabaseSetup:
     def _setup(self, engine: str) -> None:
         section(f"{engine.title()} Setup")
 
-        family = self.system.distro_family
+        family = "windows" if IS_WINDOWS else self.system.distro_family
         info = _DB_MAP.get(engine, {}).get(family)
         if not info:
-            log_err(f"No package mapping for {engine} on {family}.")
+            log_err(f"No package mapping for {engine} on {family or 'this platform'}.")
             return
 
         # Install
@@ -109,7 +113,7 @@ class DatabaseSetup:
         log_ok(f"{engine.title()} packages installed.")
 
         # PostgreSQL init on Arch/Fedora
-        if engine == "postgresql":
+        if engine == "postgresql" and not IS_WINDOWS:
             self._pg_init()
 
         # Enable + start service
@@ -120,6 +124,8 @@ class DatabaseSetup:
                 log_ok(f"Service '{svc}' enabled and started.")
             except Exception:
                 log_warn(f"Could not enable service '{svc}'.")
+        elif IS_WINDOWS:
+            self._start_windows_service(svc, engine)
 
         # Engine-specific config wizard
         match engine:
@@ -135,42 +141,55 @@ class DatabaseSetup:
 
         log_ok(f"{engine.title()} setup complete.")
 
+    def _start_windows_service(self, svc: str, engine: str) -> None:
+        """Attempt to start a Windows service."""
+        try:
+            run_cmd(["sc", "query", svc], check=False)
+            run_cmd(["net", "start", svc], check=False)
+            log_ok(f"Service '{svc}' started.")
+        except CommandError:
+            log_info(
+                f"Could not auto-start the {engine} service.\n"
+                f"    You may need to start it manually from Services (services.msc)\n"
+                f"    or run: net start {svc}"
+            )
+
     # ── MySQL / MariaDB wizard ────────────────────────────────────────
 
     def _mysql_wizard(self, engine: str) -> None:
         section(f"{engine.title()} — Secure Configuration")
 
-        # Run mysql_secure_installation if available
-        secure_cmd = "mariadb-secure-installation" if engine == "mariadb" else "mysql_secure_installation"
-        if shutil.which(secure_cmd):
-            if confirm(f"Run {secure_cmd} (recommended)?"):
-                log(f"Launching {secure_cmd}…")
-                run_cmd([secure_cmd], sudo=True, capture=False, check=False)
-                log_ok("Secure installation completed.")
+        # Run mysql_secure_installation if available (Linux only)
+        if not IS_WINDOWS:
+            secure_cmd = "mariadb-secure-installation" if engine == "mariadb" else "mysql_secure_installation"
+            if shutil.which(secure_cmd):
+                if confirm(f"Run {secure_cmd} (recommended)?"):
+                    log(f"Launching {secure_cmd}…")
+                    run_cmd([secure_cmd], sudo=True, capture=False, check=False)
+                    log_ok("Secure installation completed.")
 
         console.print()
-        if not confirm("Create a new database user and database?"):
+        if not confirm("Create a database user with full privileges?"):
             return
 
         from rich.prompt import Prompt
 
-        db_name = prompt("Database name")
         db_user = prompt("Username")
         db_pass = Prompt.ask("  Password", password=True)
-        if not all((db_name, db_user, db_pass)):
-            log_warn("All fields are required.")
+        if not all((db_user, db_pass)):
+            log_warn("Both username and password are required.")
             return
 
-        # Build SQL commands
+        # Build SQL — create user with ALL PRIVILEGES on all databases
         client_cmd = "mariadb" if engine == "mariadb" and shutil.which("mariadb") else "mysql"
         sql = (
-            f"CREATE DATABASE IF NOT EXISTS `{_safe_ident(db_name)}`;\n"
             f"CREATE USER IF NOT EXISTS '{_safe_ident(db_user)}'@'localhost' IDENTIFIED BY '{_safe_str(db_pass)}';\n"
-            f"GRANT ALL PRIVILEGES ON `{_safe_ident(db_name)}`.* TO '{_safe_ident(db_user)}'@'localhost';\n"
+            f"GRANT ALL PRIVILEGES ON *.* TO '{_safe_ident(db_user)}'@'localhost' WITH GRANT OPTION;\n"
             f"FLUSH PRIVILEGES;\n"
         )
 
-        self._exec_sql_via_tempfile(client_cmd, sql, sudo=True)
+        use_sudo = not IS_WINDOWS
+        self._exec_sql_via_tempfile(client_cmd, sql, sudo=use_sudo)
 
     # ── PostgreSQL wizard ─────────────────────────────────────────────
 
@@ -195,47 +214,49 @@ class DatabaseSetup:
                 log_ok("PostgreSQL cluster initialized.")
 
     def _pg_wizard(self) -> None:
-        section("PostgreSQL — User & Database Setup")
+        section("PostgreSQL — User Setup")
 
         console.print()
-        if not confirm("Create a new PostgreSQL user and database?"):
+        if not confirm("Create a PostgreSQL user with full privileges?"):
             return
 
         from rich.prompt import Prompt
 
-        db_name = prompt("Database name")
         db_user = prompt("Username")
         db_pass = Prompt.ask("  Password", password=True)
-        if not all((db_name, db_user, db_pass)):
-            log_warn("All fields are required.")
+        if not all((db_user, db_pass)):
+            log_warn("Both username and password are required.")
             return
 
-        sql_user = (
+        sql = (
             f"DO $$ BEGIN\n"
             f"  IF NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = '{_safe_ident(db_user)}') THEN\n"
-            f"    CREATE ROLE \"{_safe_ident(db_user)}\" WITH LOGIN PASSWORD '{_safe_str(db_pass)}';\n"
+            f"    CREATE ROLE \"{_safe_ident(db_user)}\" WITH LOGIN PASSWORD '{_safe_str(db_pass)}' SUPERUSER CREATEDB CREATEROLE;\n"
             f"  END IF;\n"
             f"END $$;\n"
         )
-        sql_db = (
-            f"SELECT 'CREATE DATABASE \"{_safe_ident(db_name)}\" OWNER \"{_safe_ident(db_user)}\"'\n"
-            f"WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = '{_safe_ident(db_name)}')\\gexec\n"
-        )
 
-        self._exec_pg_sql(sql_user + sql_db)
+        self._exec_pg_sql(sql)
 
     def _exec_pg_sql(self, sql: str) -> None:
-        """Execute SQL as the postgres system user via psql."""
+        """Execute SQL via psql (as postgres user on Linux, directly on Windows)."""
         fd, tmp_path = tempfile.mkstemp(suffix=".sql", prefix="pgsetup_")
         try:
             os.write(fd, sql.encode())
             os.close(fd)
             os.chmod(tmp_path, stat.S_IRUSR | stat.S_IWUSR)  # 0600
 
-            run_cmd(
-                ["sudo", "-u", "postgres", "psql", "-f", tmp_path],
-                check=False,
-            )
+            if IS_WINDOWS:
+                psql = shutil.which("psql")
+                if not psql:
+                    log_err("psql not found. Add PostgreSQL bin directory to your PATH.")
+                    return
+                run_cmd([psql, "-U", "postgres", "-f", tmp_path], check=False)
+            else:
+                run_cmd(
+                    ["sudo", "-u", "postgres", "psql", "-f", tmp_path],
+                    check=False,
+                )
             log_ok("PostgreSQL commands executed.")
         except CommandError as e:
             log_err(f"psql error: {e.stderr}")
@@ -322,10 +343,20 @@ class DatabaseSetup:
         elif engine == "postgresql":
             log(f"Importing {sql_file.name} into {db_name}…")
             try:
-                run_cmd(
-                    ["sudo", "-u", "postgres", "psql", "-d", _safe_ident(db_name), "-f", str(sql_file)],
-                    check=False,
-                )
+                if IS_WINDOWS:
+                    psql = shutil.which("psql")
+                    if not psql:
+                        log_err("psql not found. Add PostgreSQL bin directory to your PATH.")
+                        return
+                    run_cmd(
+                        [psql, "-U", "postgres", "-d", _safe_ident(db_name), "-f", str(sql_file)],
+                        check=False,
+                    )
+                else:
+                    run_cmd(
+                        ["sudo", "-u", "postgres", "psql", "-d", _safe_ident(db_name), "-f", str(sql_file)],
+                        check=False,
+                    )
                 log_ok(f"SQL file imported into '{db_name}'.")
             except CommandError as e:
                 log_err(f"Import failed: {e.stderr}")
