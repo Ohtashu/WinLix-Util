@@ -43,6 +43,7 @@ _THEME = Theme(
 )
 
 console = Console(theme=_THEME, highlight=False)
+_stderr_console = Console(theme=_THEME, highlight=False, stderr=True)
 
 # ── Timestamp helper ─────────────────────────────────────────────────────
 
@@ -67,7 +68,7 @@ def log_warn(msg: str) -> None:
 
 
 def log_err(msg: str) -> None:
-    console.print(f"  [err]✖ {msg}[/err]", stderr=True)
+    _stderr_console.print(f"  [err]✖ {msg}[/err]")
     _file_logger.error(msg)
 
 
