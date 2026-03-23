@@ -66,34 +66,44 @@ if ([int]$PyMajor -lt 3 -or ([int]$PyMajor -eq 3 -and [int]$PyMinor -lt 10)) {
 }
 Write-Host "  Python: $PythonCmd ($PyVer)"
 
-# ── Download source if not present ───────────────────────
-if (-not (Test-Path "$InstallDir\pyproject.toml")) {
-    Write-Host "  Downloading WinLix-Util…"
-    $ZipUrl      = "https://github.com/$Repo/archive/refs/heads/$Branch.zip"
-    $ZipPath     = "$env:TEMP\winlix-util.zip"
-    $ExtractPath = "$env:TEMP\winlix-extract"
+# ── Download / update source ──────────────────────────────
+Write-Host "  Updating WinLix-Util…"
+$ZipUrl      = "https://github.com/$Repo/archive/refs/heads/$Branch.zip"
+$ZipPath     = "$env:TEMP\winlix-util.zip"
+$ExtractPath = "$env:TEMP\winlix-extract"
 
-    try {
-        [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-        Invoke-WebRequest -Uri $ZipUrl -OutFile $ZipPath -UseBasicParsing
-    } catch {
+try {
+    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+    Invoke-WebRequest -Uri $ZipUrl -OutFile $ZipPath -UseBasicParsing
+} catch {
+    if (Test-Path "$InstallDir\pyproject.toml") {
+        Write-Host "  ⚠ Download failed — using existing local copy." -ForegroundColor Yellow
+    } else {
         Write-Host "ERROR: Failed to download — check your internet connection." -ForegroundColor Red
         Write-Host "  $_" -ForegroundColor DarkGray
         exit 1
     }
+}
 
+if (Test-Path $ZipPath) {
     if (Test-Path $ExtractPath) { Remove-Item $ExtractPath -Recurse -Force }
     Expand-Archive -Path $ZipPath -DestinationPath $ExtractPath
 
     $Inner = Get-ChildItem $ExtractPath | Select-Object -First 1
+
+    # Preserve the venv across updates
+    if (Test-Path $VenvDir) {
+        Move-Item $VenvDir "$env:TEMP\winlix-venv-backup" -Force
+    }
     if (Test-Path $InstallDir) { Remove-Item $InstallDir -Recurse -Force }
     Move-Item $Inner.FullName $InstallDir
+    if (Test-Path "$env:TEMP\winlix-venv-backup") {
+        Move-Item "$env:TEMP\winlix-venv-backup" $VenvDir -Force
+    }
 
     Remove-Item $ZipPath -Force
     Remove-Item $ExtractPath -Recurse -Force
-    Write-Host "  ✔ Source downloaded."
-} else {
-    Write-Host "  Source found at $InstallDir"
+    Write-Host "  ✔ Source updated."
 }
 
 # ── Create venv if missing or broken ─────────────────────
@@ -107,19 +117,16 @@ if (-not (Test-Path $VenvPython)) {
     }
 }
 
-# ── Install toolkit if not yet installed ─────────────────
-& $VenvPython -c "import toolkit" 2>&1 | Out-Null
+# ── Install / update toolkit dependencies ─────────────────
+Write-Host "  Installing dependencies…"
+& $VenvPython -m pip install --upgrade pip -q 2>&1 | Out-Null
+& $VenvPython -m pip install -e "$InstallDir" -q 2>&1 | Out-Null
 if ($LASTEXITCODE -ne 0) {
-    Write-Host "  Installing dependencies…"
-    & $VenvPython -m pip install --upgrade pip -q 2>&1 | Out-Null
-    & $VenvPython -m pip install -e "$InstallDir" -q 2>&1 | Out-Null
-    if ($LASTEXITCODE -ne 0) {
-        Write-Host "ERROR: pip install failed." -ForegroundColor Red
-        Write-Host "  Try manually: & '$VenvPython' -m pip install -e '$InstallDir'" -ForegroundColor Yellow
-        exit 1
-    }
-    Write-Host "  ✔ Dependencies installed."
+    Write-Host "ERROR: pip install failed." -ForegroundColor Red
+    Write-Host "  Try manually: & '$VenvPython' -m pip install -e '$InstallDir'" -ForegroundColor Yellow
+    exit 1
 }
+Write-Host "  ✔ Dependencies installed."
 
 # ── Create a global wrapper batch file ────────────────────
 $BinDir = "$env:USERPROFILE\.local\bin"
