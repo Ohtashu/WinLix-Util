@@ -71,6 +71,14 @@ _DB_BINARIES: dict[str, list[str]] = {
     "mongodb":    ["mongod", "mongosh", "mongo"],
 }
 
+# Common Windows install directories (glob patterns under Program Files)
+_WIN_SEARCH_DIRS: dict[str, list[str]] = {
+    "mariadb":    ["MariaDB*"],
+    "mysql":      ["MySQL*"],
+    "postgresql": ["PostgreSQL*"],
+    "mongodb":    ["MongoDB*"],
+}
+
 
 class DatabaseSetup:
     """Interactive database server setup wizard."""
@@ -114,10 +122,8 @@ class DatabaseSetup:
         pkgs = info["pkg"]
         svc = info["svc"]
 
-        # Check if already installed
-        already_installed = any(
-            shutil.which(b) for b in _DB_BINARIES.get(engine, [])
-        )
+        # Check if already installed (binary on PATH, Windows install dir, or service exists)
+        already_installed = self._detect_installed(engine, svc)
 
         if already_installed:
             log_ok(f"{engine.title()} is already installed.")
@@ -133,6 +139,10 @@ class DatabaseSetup:
                     console.print(f"    winget install -e --id {pkgs}")
                 return
             log_ok(f"{engine.title()} packages installed.")
+
+        # Add DB bin directory to PATH for the current session (Windows)
+        if IS_WINDOWS:
+            self._add_db_to_path(engine)
 
         # PostgreSQL init on Arch/Fedora
         if engine == "postgresql" and not IS_WINDOWS:
@@ -163,13 +173,55 @@ class DatabaseSetup:
 
         log_ok(f"{engine.title()} setup complete.")
 
+    def _detect_installed(self, engine: str, svc: str) -> bool:
+        """Check if a DB engine is already installed (PATH, install dirs, or service)."""
+        # 1. Check PATH
+        for binary in _DB_BINARIES.get(engine, []):
+            if shutil.which(binary):
+                return True
+
+        if IS_WINDOWS:
+            # 2. Check common install directories under Program Files
+            for pf in [os.environ.get("ProgramFiles", ""), os.environ.get("ProgramFiles(x86)", "")]:
+                if not pf:
+                    continue
+                for pattern in _WIN_SEARCH_DIRS.get(engine, []):
+                    for install_dir in Path(pf).glob(pattern):
+                        bin_dir = install_dir / "bin"
+                        if bin_dir.is_dir():
+                            return True
+
+            # 3. Check if the Windows service already exists
+            if self._find_windows_service(svc, engine):
+                return True
+
+        return False
+
+    def _add_db_to_path(self, engine: str) -> None:
+        """Find DB bin directory on Windows and add it to PATH for this session."""
+        for pf in [os.environ.get("ProgramFiles", ""), os.environ.get("ProgramFiles(x86)", "")]:
+            if not pf:
+                continue
+            for pattern in _WIN_SEARCH_DIRS.get(engine, []):
+                for install_dir in Path(pf).glob(pattern):
+                    bin_dir = install_dir / "bin"
+                    if bin_dir.is_dir() and str(bin_dir) not in os.environ.get("PATH", ""):
+                        os.environ["PATH"] = str(bin_dir) + os.pathsep + os.environ.get("PATH", "")
+                        log_info(f"Added {bin_dir} to session PATH.")
+                        return
+
     def _start_windows_service(self, svc: str, engine: str) -> None:
-        """Find, auto-start, and start a Windows service."""
+        """Find, register if needed, auto-start, and start a Windows service."""
         # Try to find the service (it might have a slightly different name)
         svc_name = self._find_windows_service(svc, engine)
+
+        # If service doesn't exist, try to register it
+        if not svc_name:
+            svc_name = self._register_windows_service(engine)
+
         if not svc_name:
             log_warn(
-                f"Could not find the {engine} Windows service.\n"
+                f"Could not find or register the {engine} Windows service.\n"
                 f"    You may need to start it manually from Services (services.msc)."
             )
             return
@@ -200,6 +252,42 @@ class DatabaseSetup:
                 f"    Try running as Administrator, or start manually:\n"
                 f"    net start {svc_name}"
             )
+
+    def _register_windows_service(self, engine: str) -> str | None:
+        """Register a DB engine as a Windows service if the binary is found."""
+        if engine in ("mariadb", "mysql"):
+            # Find the server daemon
+            for pf in [os.environ.get("ProgramFiles", "")]:
+                if not pf:
+                    continue
+                for pattern in _WIN_SEARCH_DIRS.get(engine, []):
+                    for install_dir in Path(pf).glob(pattern):
+                        bin_dir = install_dir / "bin"
+                        daemon = bin_dir / ("mariadbd.exe" if engine == "mariadb" else "mysqld.exe")
+                        if daemon.exists():
+                            svc_name = "MariaDB" if engine == "mariadb" else "MySQL"
+                            log(f"Registering {engine} as Windows service '{svc_name}'…")
+                            # Initialize data directory if needed
+                            data_dir = install_dir / "data"
+                            if not data_dir.exists():
+                                install_db = bin_dir / "mariadb-install-db.exe"
+                                if install_db.exists():
+                                    log("Initializing data directory…")
+                                    try:
+                                        run_cmd([str(install_db)], check=False, capture=False)
+                                    except CommandError:
+                                        pass
+                            try:
+                                run_cmd(
+                                    [str(daemon), "--install", svc_name],
+                                    check=False,
+                                )
+                                log_ok(f"Service '{svc_name}' registered.")
+                                return svc_name
+                            except CommandError:
+                                log_warn("Failed to register service. Try running as Administrator.")
+                                return None
+        return None
 
     def _find_windows_service(self, svc: str, engine: str) -> str | None:
         """Find the actual Windows service name (services may vary by version)."""
