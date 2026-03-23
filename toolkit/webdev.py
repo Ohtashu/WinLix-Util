@@ -448,6 +448,17 @@ class WebDevSetup:
         """Node.js + React + Tailwind CSS."""
         if not self._ensure_node():
             return
+
+        project_dir = self._ask_project_source()
+        if project_dir:
+            # Tailwind inside the cloned project
+            if (project_dir / "package.json").exists():
+                console.print()
+                if confirm("Add Tailwind CSS to the project?"):
+                    log_info(f"Adding Tailwind to {project_dir.name}/")
+                    self._add_tailwind_to_project(project_dir)
+            return
+
         self._scaffold_react()
 
         # Tailwind inside the new project
@@ -511,7 +522,14 @@ class WebDevSetup:
         self._setup_php()
 
         console.print()
-        if confirm("Scaffold a React project now?"):
+        project_dir = self._ask_project_source()
+        if project_dir:
+            # Cloned from GitHub — offer Tailwind on top
+            if (project_dir / "package.json").exists():
+                console.print()
+                if confirm("Add Tailwind CSS?"):
+                    self._add_tailwind_to_project(project_dir)
+        elif confirm("Scaffold a React project now?"):
             self._scaffold_react()
 
             console.print()
@@ -563,6 +581,71 @@ class WebDevSetup:
     # ══════════════════════════════════════════════════════════════════
     #  Helpers
     # ══════════════════════════════════════════════════════════════════
+
+    def _ask_project_source(self) -> Path | None:
+        """Ask user whether to clone a GitHub repo or scaffold fresh.
+
+        Returns the cloned project Path, or None to scaffold a new project.
+        """
+        section("Project Source")
+        console.print("  [bold]How would you like to start?[/bold]")
+        console.print("    [cyan]1)[/cyan] Clone an existing GitHub repository")
+        console.print("    [cyan]2)[/cyan] Scaffold a new project from scratch")
+        console.print()
+
+        from rich.prompt import Prompt
+        choice = Prompt.ask("  Enter choice", default="2").strip()
+
+        if choice == "1":
+            return self._clone_github_repo()
+        return None
+
+    def _clone_github_repo(self) -> Path | None:
+        """Prompt for a GitHub URL and clone it into the current directory."""
+        if not shutil.which("git"):
+            log_err("git is not installed. Please install git first.")
+            return None
+
+        repo_url = prompt("GitHub repo URL", default="").strip()
+        if not repo_url:
+            return None
+
+        # Accept shorthand "user/repo" as well as full URLs
+        if re.match(r'^[\w.-]+/[\w.-]+$', repo_url):
+            repo_url = f"https://github.com/{repo_url}.git"
+
+        # Derive project name from URL
+        default_name = re.sub(r'\.git$', '', repo_url.rstrip('/').rsplit('/', 1)[-1])
+        project_name = prompt("Local folder name", default=default_name)
+        if not project_name:
+            return None
+
+        target = Path.cwd() / project_name
+        if target.exists():
+            log_warn(f"Directory '{project_name}' already exists.")
+            if not confirm("Remove and re-clone?"):
+                return target  # Use existing directory as-is
+            shutil.rmtree(target)
+
+        log(f"Cloning {repo_url} → ./{project_name}")
+        try:
+            run_cmd(["git", "clone", repo_url, str(target)], check=True, capture=False)
+            log_ok(f"Repository cloned to ./{project_name}")
+
+            # Install npm deps if package.json exists
+            npm = self._find_npm()
+            if npm and (target / "package.json").exists():
+                if confirm("Install npm dependencies?"):
+                    log("Running npm install…")
+                    try:
+                        run_cmd([npm, "install"], check=True, capture=False)
+                    except CommandError:
+                        log_warn("npm install failed — you can run it manually later.")
+
+            return target
+        except CommandError:
+            log_err("git clone failed. Check the URL and try again.")
+            return None
 
     def _find_npm(self) -> str | None:
         """Find npm, including nvm-managed versions."""
